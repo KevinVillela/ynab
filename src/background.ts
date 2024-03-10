@@ -1,5 +1,5 @@
 import * as ynab from "ynab";
-import { FullTransaction, parseOrders, parseTransactions as parseTransactions } from "./amazon";
+import { FullTransaction, parseOrders, parseTransactions, OrderInfo} from "./amazon";
 import * as statusAnd from "./status_and";
 
 function getDocument(): Promise<string> {
@@ -22,8 +22,10 @@ function getDocument(): Promise<string> {
  * We then need to go to the orders page at https://www.amazon.com/gp/css/order-history?ie=UTF8&ref=nav_orders_first 
  * and page through each page of orders until we have all the ones we want. Then, we match the info from those two 
  * sources up - and finally, we'll be ready to match things up with YNAB transactions.
+ * 
+ * @param numOrders The number of orders to crawl for.
  */
-async function getAmazonInfo(): Promise<statusAnd.StatusAnd<FullTransaction[]>> {
+async function getAmazonInfo(numOrders: number): Promise<statusAnd.StatusAnd<FullTransaction[]>> {
     // First part: Amazon Transactions page, with high-level order data like number and dollar amount.
     const tab: chrome.tabs.Tab = await new Promise((resolve) => {
         chrome.tabs.query({ active: true, currentWindow: true }, (result) => {
@@ -49,21 +51,26 @@ async function getAmazonInfo(): Promise<statusAnd.StatusAnd<FullTransaction[]>> 
     }
 
     // Next up: Orders page.
-    await chrome.tabs.update({
-        url: "https://www.amazon.com/gp/css/order-history?ie=UTF8&ref=nav_orders_first "
-    });
-    // A big hack: Sleep so the document has a chance to start loading.
-    await new Promise(r => setTimeout(r, 1000));
-    const ordersPage = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: getDocument,
-        args: []
-    });
-    const ordersHtml = ordersPage[0].result;
-    const orders = parseOrders(ordersHtml);
-    console.log(`Orders: ${JSON.stringify(orders)}`);
-    if (!orders.length) {
-        return statusAnd.error('Found no Amazon orders from the orders page.')
+    const orders: OrderInfo[] = [];
+    for (let i = 0; i < numOrders; i += 10) {
+        const url = `https://www.amazon.com/your-orders/orders?_encoding=UTF8&ref=nav_orders_first&startIndex=${i}`
+        await chrome.tabs.update({
+            url
+        });
+        // A big hack: Sleep so the document has a chance to start loading.
+        await new Promise(r => setTimeout(r, 1000));
+        const ordersPage = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: getDocument,
+            args: []
+        });
+        const ordersHtml = ordersPage[0].result;
+        const newOrders = parseOrders(ordersHtml);
+        console.log(`Orders for page : ${JSON.stringify(newOrders)}`);
+        if (!newOrders.length) {
+            return statusAnd.error(`Found no Amazon orders from the Order page with index ${i} (0-indexed)`);
+        }
+        orders.push(...newOrders);
     }
     const ordersMap = new Map(orders.map((order) => [order.orderNumber, order.itemNames]));
 
@@ -85,7 +92,7 @@ async function getAmazonInfo(): Promise<statusAnd.StatusAnd<FullTransaction[]>> 
 }
 
 chrome.runtime.onMessage.addListener(async (request: any, sender: chrome.runtime.MessageSender, _sendResponse: (v: any) => void): Promise<void> => {
-    const amazonTransactions = await getAmazonInfo();
+    const amazonTransactions = await getAmazonInfo(request['num_orders']);
     if (statusAnd.isError(amazonTransactions)) {
         await chrome.runtime.sendMessage(amazonTransactions);
         return;

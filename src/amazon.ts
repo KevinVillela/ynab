@@ -62,7 +62,7 @@ export function parseTransactions(html: string): Transaction[] {
 }
 
 /** Extracted order information. */
-interface OrderInfo {
+export interface OrderInfo {
     orderNumber: string;
     itemNames: string[];
 }

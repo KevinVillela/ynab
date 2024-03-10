@@ -17,7 +17,7 @@ document.addEventListener('DOMContentLoaded', function () {
 document.getElementById("run")!.addEventListener("click", async () => {
     const ynabAccessToken = (document.getElementById('ynab_access_token') as HTMLInputElement).value;
     await chrome.storage.local.set({"ynab_access_token": ynabAccessToken});
-    await chrome.runtime.sendMessage({ type: "run", ynabAccessToken });
+    await chrome.runtime.sendMessage({ type: "run", ynabAccessToken, "num_orders": 50});
     // The response will come in a different message (see addListener below).
 });
 
