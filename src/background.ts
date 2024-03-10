@@ -1,5 +1,6 @@
 import * as ynab from "ynab";
 import { FullTransaction, parseOrders, parseTransactions as parseTransactions } from "./amazon";
+import * as statusAnd from "./status_and";
 
 function getDocument(): Promise<string> {
     if (document.readyState === 'loading') {
@@ -22,25 +23,30 @@ function getDocument(): Promise<string> {
  * and page through each page of orders until we have all the ones we want. Then, we match the info from those two 
  * sources up - and finally, we'll be ready to match things up with YNAB transactions.
  */
-async function getAmazonInfo() {
+async function getAmazonInfo(): Promise<statusAnd.StatusAnd<FullTransaction[]>> {
     // First part: Amazon Transactions page, with high-level order data like number and dollar amount.
     const tab: chrome.tabs.Tab = await new Promise((resolve) => {
-        chrome.tabs.query({active: true, currentWindow: true}, (result) => {
-            // TODO error and warning handling.
+        chrome.tabs.query({ active: true, currentWindow: true }, (result) => {
             resolve(result[0]);
         });
     });
+    if (!tab.id) {
+        return statusAnd.error('Could not get current tab.')
+    }
     const transactionsPage = await chrome.scripting.executeScript({
-        target: { tabId: tab.id ? tab.id : -1 },
+        target: { tabId: tab.id },
         func: getDocument,
         args: [],
     })
     if (!transactionsPage || !transactionsPage[0].result) {
-        console.error('Unable to get page HTML when scraping the Amazon page.')
+        return statusAnd.error('Unable to get page HTML when scraping the Amazon page.')
     }
     const amazonHtml = transactionsPage[0].result
     const amazonTransactions = parseTransactions(amazonHtml);
     console.log(`Amazon Transactions: ${JSON.stringify(amazonTransactions)}`);
+    if (!amazonTransactions.length) {
+        return statusAnd.error('Found no Amazon transactions. Are you on the transactions page?')
+    }
 
     // Next up: Orders page.
     await chrome.tabs.update({
@@ -49,13 +55,16 @@ async function getAmazonInfo() {
     // A big hack: Sleep so the document has a chance to start loading.
     await new Promise(r => setTimeout(r, 1000));
     const ordersPage = await chrome.scripting.executeScript({
-        target: { tabId: tab.id ? tab.id : -1 },
+        target: { tabId: tab.id },
         func: getDocument,
         args: []
     });
     const ordersHtml = ordersPage[0].result;
     const orders = parseOrders(ordersHtml);
     console.log(`Orders: ${JSON.stringify(orders)}`);
+    if (!orders.length) {
+        return statusAnd.error('Found no Amazon orders from the orders page.')
+    }
     const ordersMap = new Map(orders.map((order) => [order.orderNumber, order.itemNames]));
 
     // Here's a limitation of our strategy: For orders of multiple items, we don't know 
@@ -67,24 +76,28 @@ async function getAmazonInfo() {
     amazonTransactions.forEach((transaction) => {
         const order = ordersMap.get(transaction.orderNumber);
         if (!order) {
-            console.warn(`Could not find information for transaction with order ${transaction.orderNumber}`);
+            console.warn(`Could not find order information for transaction with order ${transaction.orderNumber}`);
             return;
         }
         transactions.push({ ...transaction, itemNames: order });
     });
-    return transactions;
+    return statusAnd.ready(transactions);
 }
 
-chrome.runtime.onMessage.addListener(async (request: any, sender: chrome.runtime.MessageSender, sendResponse: (v: any) => void) => {
+chrome.runtime.onMessage.addListener(async (request: any, sender: chrome.runtime.MessageSender, _sendResponse: (v: any) => void): Promise<void> => {
     const amazonTransactions = await getAmazonInfo();
-    console.log(`Amazon Transactions: ${JSON.stringify(amazonTransactions)}`);
+    if (statusAnd.isError(amazonTransactions)) {
+        await chrome.runtime.sendMessage(amazonTransactions);
+        return;
+    }
+    console.log(`Amazon Orders: ${JSON.stringify(amazonTransactions)}`);
 
     const accessToken = request['ynabAccessToken'];
     const ynabAPI = new ynab.API(accessToken);
     const budgetsResponse = await ynabAPI.budgets.getBudgets();
     const budgets = budgetsResponse.data.budgets;
-    if (!budgets) {
-        console.error('API call to get budgets was successful, but returned 0 budgets!')
+    if (!budgets?.length) {
+        await chrome.runtime.sendMessage(statusAnd.error('API call to get budgets was successful, but returned 0 budgets!'));
         return;
     }
     const budget = budgets.sort((a, b) => {
@@ -102,19 +115,27 @@ chrome.runtime.onMessage.addListener(async (request: any, sender: chrome.runtime
 
     console.log(`Got ${budgets.length} budgets, picking the most recently modified one with name ${budget.name} and ID ${budget.id}, which was modified on ${budget.last_modified_on}`);
     const transactions = await ynabAPI.transactions.getTransactionsByType(budget.id, 'uncategorized')
+    if (!transactions?.data?.transactions?.length) {
+        await chrome.runtime.sendMessage(statusAnd.error(`Found no uncategorized YNAB transactions.`));
+        return;
+    }
     console.log(`Got ${transactions.data.transactions.length} uncategorized transactions.`);
 
     const ynabAmazonTransactions = transactions.data.transactions.filter((t) => t.payee_name?.includes('Amazon'));
+    if (!ynabAmazonTransactions.length) {
+        await chrome.runtime.sendMessage(statusAnd.error(`Although we found ${transactions.data.transactions.length} uncategorized YNAB transactions, none of them were classified as being from Amazon.`));
+        return;
+    }
     console.log(`Got ${ynabAmazonTransactions.length} Amazon transactions!`);
 
     const toUpdate: ynab.SaveTransactionWithId[] = [];
     // For now, just match it up by amount. TODO: Make this more robust, e.g. by resolving duplicates by date.
-    const amazonTransactionsMap = new Map(amazonTransactions.map((a) => [a.priceInCents, a]));
+    const amazonTransactionsMap = new Map(amazonTransactions.result.map((a) => [a.priceInCents, a]));
     ynabAmazonTransactions.forEach((ynabAmazonTransaction) => {
         // Lookup by amount (divide by 10 to convert from milliunits - https://api.ynab.com/#formats).
         const amazonTransaction = amazonTransactionsMap.get(ynabAmazonTransaction.amount / 10);
         if (!amazonTransaction) {
-            // console.warn(`Could not find amazon Transaction for YNAB transaction ${JSON.stringify(ynabAmazonTransaction)}`);
+            console.warn(`Could not find amazon Transaction for YNAB transaction ${JSON.stringify(ynabAmazonTransaction)}`);
             return;
         }
         let memo = amazonTransaction.itemNames.join('; ');
@@ -125,8 +146,7 @@ chrome.runtime.onMessage.addListener(async (request: any, sender: chrome.runtime
         ynabAmazonTransaction.memo = memo;
         toUpdate.push(ynabAmazonTransaction);
     });
-
     // Finally, do the update!!
     await ynabAPI.transactions.updateTransactions(budget.id, { transactions: toUpdate });
-    await chrome.runtime.sendMessage({action: "Success", message: `Successfully updated ${toUpdate.length} transaction(s)!`});
+    await chrome.runtime.sendMessage(statusAnd.ready(`Successfully updated ${toUpdate.length} transaction(s)!`));
 });

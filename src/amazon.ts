@@ -49,7 +49,7 @@ export function parseTransactions(html: string): Transaction[] {
             if (!payeeElement) {
                 // Some transactions don't have payee info, e.g. if you use an Amazon Gift Card elsewhere.
                 // Ignore these for now.
-                console.warn(`Ignoring transaction with no payee information.`);
+                console.warn(`Ignoring transaction ${orderNumber} with no payee information.`);
                 return;
             }
             const payee = payeeElement.textContent!.trim();
