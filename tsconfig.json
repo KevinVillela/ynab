@@ -1,0 +1,16 @@
+{
+    "compilerOptions": {
+       "strict": true,
+       // No idea why these are required. But see https://github.com/kulshekhar/ts-jest/issues/4198#issuecomment-1962304355.
+       "module": "ESNext",
+       "target": "ES2020",
+       "esModuleInterop": true,
+       "sourceMap": true,
+       "rootDir": "",
+       "outDir": "dist/js",
+       "noEmitOnError": true,
+       "typeRoots": [ "node_modules/@types" ],
+       "moduleResolution": "Node"
+    },
+    "exclude": [],
+ }

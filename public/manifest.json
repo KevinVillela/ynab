@@ -1,0 +1,21 @@
+{
+	"name": "YNABBB",
+	"description": "You Need a Budget - But Better.",
+	"version": "1.0",
+	"manifest_version": 3,
+	"action": {
+		"default_popup": "popup.html"
+	},
+	"permissions": [
+		"activeTab",
+		"scripting",
+		"tabs",
+		"storage"
+	],
+	"host_permissions": [
+        "https://www.amazon.com/*"
+    ],
+	"background": {
+		"service_worker": "background.js"
+	}
+}
